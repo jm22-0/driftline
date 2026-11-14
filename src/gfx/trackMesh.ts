@@ -13,7 +13,7 @@ import type { Palette } from './palette';
 import { type PitLane, pitRowIndex, pitWallAtRow, rowWithin } from '../game/pitLane';
 import { createSurfaceTextures } from './textures';
 import { clamp, lerp } from '../core/mathx';
-import { TRACK, WEATHER } from '../game/tuning';
+import { RACING_AI, TRACK, WEATHER } from '../game/tuning';
 
 /**
  * 路面标线的尺寸(米)。**在着色器里按真实宽度画,不走顶点色。**
@@ -28,6 +28,26 @@ import { TRACK, WEATHER } from '../game/tuning';
  */
 const EDGE_LINE_WIDTH = 0.25;
 const START_LINE_DEPTH = 0.6;
+
+/**
+ * 赛车线上的橡胶痕迹(HANDOFF 第七十三节)。
+ *
+ * 真实赛道跑过一个周末,走线上会压出一条比周围沥青深的带子 —— 弯里和刹车区
+ * 最重,直道上只有淡淡一条。它是「这条路有车跑过」最省的线索,也顺带告诉玩家
+ * 线该怎么走。
+ *
+ * - 宽度按高斯算,`RUBBER_HALF_WIDTH` 是 1σ:车宽 1.9 米加上每圈走线的散布,
+ *   压出来的带子大约 3 米宽。
+ * - 压暗的比例:直道 `RUBBER_STRAIGHT`,曲率到 `RUBBER_FULL_CURVATURE` 时到
+ *   `RUBBER_CORNER`。橡胶本身近乎黑,但只是薄薄一层嵌在颗粒里,不会把沥青盖死。
+ */
+const RUBBER_HALF_WIDTH = 1.3;
+const RUBBER_STRAIGHT = 0.1;
+const RUBBER_CORNER = 0.38;
+/** 曲率到多大算「重弯」(1/m)。半径 50 米。 */
+const RUBBER_FULL_CURVATURE = 0.02;
+/** 走线沿赛道方向平滑多长(米)。真车切弯是渐进的,不是 AI 瞄点那样一步跳过去。 */
+const RUBBER_SMOOTH_METRES = 70;
 
 /** 顶点色当贴图乘数用时的中性值。 */
 const WHITE = new Color().setRGB(1, 1, 1);
@@ -97,6 +117,10 @@ function createRibbon(course: Course, rng: Rng, palette: Palette, pit: PitLane |
   const triangles = positions.length / 9;
   const colors = new Float32Array(triangles * 9);
   const markings = new Float32Array(triangles * 3);
+  const rubbers = new Float32Array(triangles * 6);
+  const rubber = rubberLine(course);
+  // 一格两个三角、六个顶点,各自落在这一行还是下一行(`Course.buildRibbonTriangles()` 的顺序)。
+  const quadRowOffset = [0, 0, 1, 1, 1, 0];
   const tint = new Color();
 
   // 归一化的路面/路肩分界。lateral 是 -1..1,覆盖含路肩的外缘半宽。
@@ -151,11 +175,15 @@ function createRibbon(course: Course, rng: Rng, palette: Palette, pit: PitLane |
       colors[o + 1] = tint.g;
       colors[o + 2] = tint.b;
       markings[t * 3 + v] = marking;
+      const vertexRow = (row + (quadRowOffset[((t % 2) * 3 + v) % 6] ?? 0)) % rowCount;
+      rubbers[(t * 3 + v) * 2] = rubber.offset[vertexRow] ?? 0;
+      rubbers[(t * 3 + v) * 2 + 1] = rubber.strength[vertexRow] ?? 0;
     }
   }
 
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
   geometry.setAttribute('marking', new BufferAttribute(markings, 1));
+  geometry.setAttribute('rubber', new BufferAttribute(rubbers, 2));
 
   const textures = createSurfaceTextures(rng, palette.roadSurface);
   const material = new MeshStandardMaterial({
@@ -173,6 +201,53 @@ function createRibbon(course: Course, rng: Rng, palette: Palette, pit: PitLane |
   mesh.userData['roadSurface'] = true;
   mesh.receiveShadow = true;
   return mesh;
+}
+
+/**
+ * 每一行的走线位置(米,正 = 赛道右侧)和橡胶深浅(0..1 的压暗比例)。
+ *
+ * 走线和 `RacingPilot` 是同一套口径 —— 同一个曲率窗口、朝弯内偏同一个比例 ——
+ * 所以痕迹就压在对手真正跑的地方。区别只有一处:AI 的瞄点是「过了曲率门槛就
+ * 整段偏过去」的阶跃,而车开出来的轨迹是连续的,所以这里按曲率连续地偏、
+ * 再沿赛道方向平滑。不消耗随机数。
+ */
+export function rubberLine(course: Course): { offset: Float32Array; strength: Float32Array } {
+  const { samples, spacing } = course.layout;
+  const count = samples.length;
+  const half = Math.max(1, Math.round(RACING_AI.curvatureBase / spacing / 2));
+  const maxOffset = course.halfWidth * RACING_AI.lineOffset;
+  const rawOffset = new Float32Array(count);
+  const rawStrength = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const a = samples[(i - half + count) % count];
+    const b = samples[(i + half) % count];
+    if (a === undefined || b === undefined) {
+      continue;
+    }
+    const cross = a.tangentZ * b.tangentX - a.tangentX * b.tangentZ;
+    const dot = a.tangentX * b.tangentX + a.tangentZ * b.tangentZ;
+    const kappa = Math.atan2(cross, dot) / (half * 2 * spacing);
+    // 曲率到 AI 的切线门槛时偏一半,再大就贴近上限:连续,不跳。
+    rawOffset[i] = maxOffset * Math.tanh(kappa / (RACING_AI.lineCurvature * 2));
+    const corner = clamp(Math.abs(kappa) / RUBBER_FULL_CURVATURE, 0, 1);
+    rawStrength[i] = lerp(RUBBER_STRAIGHT, RUBBER_CORNER, corner);
+  }
+
+  const window = Math.max(1, Math.round(RUBBER_SMOOTH_METRES / spacing / 2));
+  const offset = new Float32Array(count);
+  const strength = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    let sumOffset = 0;
+    let sumStrength = 0;
+    for (let k = -window; k <= window; k++) {
+      const j = (i + k + count) % count;
+      sumOffset += rawOffset[j] ?? 0;
+      sumStrength += rawStrength[j] ?? 0;
+    }
+    offset[i] = sumOffset / (window * 2 + 1);
+    strength[i] = sumStrength / (window * 2 + 1);
+  }
+  return { offset, strength };
 }
 
 /** 路面标线着色器的参数。导出给单测核对:数值要和设计意图一致。 */
@@ -245,12 +320,15 @@ function applyRoadMarkings(material: MeshStandardMaterial, course: Course, palet
     shader.uniforms['uMarkStart'] = { value: new Color(...u.startAlbedo) };
     shader.uniforms['uMarkShoulder'] = { value: new Color(...u.shoulderAlbedo) };
     shader.uniforms['uMarkAsphalt'] = { value: new Color(...u.asphaltAlbedo) };
+    shader.uniforms['uRubberHalfWidth'] = { value: RUBBER_HALF_WIDTH };
 
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
         `#include <common>
 attribute float marking;
+attribute vec2 rubber;
+varying vec2 vRubber;
 varying vec2 vMarkPos;
 varying float vMarking;`,
       )
@@ -258,7 +336,8 @@ varying float vMarking;`,
         '#include <uv_vertex>',
         `#include <uv_vertex>
 vMarkPos = uv;
-vMarking = marking;`,
+vMarking = marking;
+vRubber = rubber;`,
       );
 
     shader.fragmentShader = shader.fragmentShader
@@ -274,6 +353,8 @@ uniform vec3 uMarkPaint;
 uniform vec3 uMarkStart;
 uniform vec3 uMarkShoulder;
 uniform vec3 uMarkAsphalt;
+uniform float uRubberHalfWidth;
+varying vec2 vRubber;
 varying vec2 vMarkPos;
 varying float vMarking;
 
@@ -295,6 +376,13 @@ float markBand(float x, float lo, float hi) {
 
   // 沥青颗粒系数:贴图采样 / 沥青基色,在 1 附近浮动。
   vec3 grain = sampledDiffuseColor.rgb / max(uMarkAsphalt, vec3(1e-3));
+
+  // 橡胶痕迹:走线上一条高斯带,只压暗、不改粗糙度。乘上颗粒的亮度,让它
+  // 嵌在沥青的颗粒里(凸起的石子先被磨黑),而不是一条匀匀的灰带。
+  float rubberD = (lateral - vRubber.x) / uRubberHalfWidth;
+  float rubberBand = exp(-0.5 * rubberD * rubberD) * step(side, uMarkHalfWidth);
+  float rubberGrain = clamp(dot(grain, vec3(0.3333)), 0.6, 1.4);
+  diffuseColor.rgb *= 1.0 - clamp(vRubber.y * rubberBand * rubberGrain, 0.0, 0.9);
 
   // 路肩:从路面边缘起,反照率渐变到地形色 —— 和几何上那段高度渐变
   // (Course.buildRibbon)是同一件事的两面。

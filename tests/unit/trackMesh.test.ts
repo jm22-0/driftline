@@ -12,7 +12,14 @@ import { type PitLane, createPitLane, pitRowIndex, pitWallAtRow } from '../../sr
 import { generateTrack } from '../../src/game/trackLayout';
 import { PIT, TRACK } from '../../src/game/tuning';
 import { createPalette } from '../../src/gfx/palette';
-import { applyTrackDamp, createTrackMesh, roadMarkingUniforms } from '../../src/gfx/trackMesh';
+import {
+  applyTrackDamp,
+  createTrackMesh,
+  roadMarkingUniforms,
+  rubberLine,
+} from '../../src/gfx/trackMesh';
+import { RacingPilot } from '../../src/game/racingPilot';
+import type { Vehicle } from '../../src/game/vehicle';
 
 function buildWall(seed: number): { wall: Mesh; course: Course } {
   const rng = new Rng(seed);
@@ -529,7 +536,9 @@ describe('路面标线', () => {
     expect(shader.vertexShader).toContain('attribute float marking;');
     expect(shader.fragmentShader).toContain('float markBand(');
     expect(shader.fragmentShader).toContain('diffuse * uMarkStart * paintGrain, start');
-    expect(Object.keys(shader.uniforms).length).toBe(9);
+    expect(Object.keys(shader.uniforms).length).toBe(10);
+    expect(shader.vertexShader).toContain('vRubber = rubber;');
+    expect(shader.fragmentShader).toContain('float rubberBand = ');
     // 注入点在 map_fragment 之后:颗粒系数要用它声明的 sampledDiffuseColor。
     expect(ShaderChunk.map_fragment).toContain('sampledDiffuseColor');
     const fragment = ShaderLib.standard.fragmentShader;
@@ -538,5 +547,86 @@ describe('路面标线', () => {
       fragment.indexOf('#include <color_fragment>'),
     );
     expect(material.customProgramCacheKey()).toBe('driftline-road-markings');
+  });
+});
+
+/*
+ * ── 赛车线上的橡胶痕迹(HANDOFF 第七十三节)────────────────────────────────
+ *
+ * 深浅和宽度好不好看归人类看图。这里钉的是**位置**:痕迹必须压在对手真正跑的
+ * 那一侧。符号反了的话每个弯的痕迹都在外侧,截图上照样是「路上有条深色带子」,
+ * 看不出错 —— 而玩家照着它走线会一路跑大。
+ */
+describe('赛车线橡胶痕迹', () => {
+  it('弯里偏向的那一侧和 RacingPilot 的走线一致', () => {
+    for (const seed of [42, 7, 1337]) {
+      const { course } = buildPitMesh(seed);
+      const { offset } = rubberLine(course);
+      const pilot = new RacingPilot(course.layout);
+      let compared = 0;
+      let agree = 0;
+      for (let row = 0; row < offset.length; row++) {
+        // 没有对手时避让项恒为 0,车只是被读了朝向;给一个最小的替身。
+        const aim = pilot.aimOffset({ yaw: 0, lateral: 0, arc: 0 } as unknown as Vehicle, [], row);
+        const here = offset[row] ?? 0;
+        // 只比两边都明确表了态的行:平滑会让 S 弯的换边点落在不同的行上。
+        if (aim === 0 || Math.abs(here) < 2) {
+          continue;
+        }
+        compared++;
+        agree += Math.sign(aim) === Math.sign(here) ? 1 : 0;
+      }
+      expect(compared).toBeGreaterThan(20);
+      expect(agree / compared).toBeGreaterThan(0.98);
+    }
+  });
+
+  it('走线留在路面里,而且沿赛道连续 —— 包括跨过起跑线那一格', () => {
+    for (const seed of [42, 7, 1337]) {
+      const { course } = buildPitMesh(seed);
+      const { offset, strength } = rubberLine(course);
+      for (let row = 0; row < offset.length; row++) {
+        const next = (row + 1) % offset.length;
+        expect(Math.abs(offset[row] ?? 0)).toBeLessThan(course.halfWidth - 1);
+        expect(Math.abs((offset[next] ?? 0) - (offset[row] ?? 0))).toBeLessThan(0.5);
+        expect(strength[row]).toBeGreaterThan(0);
+        expect(strength[row]).toBeLessThan(0.5);
+      }
+    }
+  });
+
+  it('弯里比直道深', () => {
+    const { course } = buildPitMesh(42);
+    const { offset, strength } = rubberLine(course);
+    let corner = 0;
+    let cornerRows = 0;
+    let straight = 0;
+    let straightRows = 0;
+    for (let row = 0; row < offset.length; row++) {
+      if (Math.abs(offset[row] ?? 0) > 3) {
+        corner += strength[row] ?? 0;
+        cornerRows++;
+      } else if (Math.abs(offset[row] ?? 0) < 0.5) {
+        straight += strength[row] ?? 0;
+        straightRows++;
+      }
+    }
+    expect(cornerRows).toBeGreaterThan(5);
+    expect(straightRows).toBeGreaterThan(5);
+    expect(corner / cornerRows).toBeGreaterThan((straight / straightRows) * 1.3);
+  });
+
+  it('每个顶点带的是它自己那一行的值 —— 一格里六个顶点分属两行', () => {
+    const { ribbon, course } = ribbonOf(42);
+    const { offset, strength } = rubberLine(course);
+    const rubber = ribbon.geometry.getAttribute('rubber') as BufferAttribute;
+    const uv = ribbon.geometry.getAttribute('uv') as BufferAttribute;
+    const rows = course.layout.samples.length;
+    for (let v = 0; v < rubber.count; v += 7) {
+      // 条带的 v 坐标就是「行号 × 段长 / 贴图尺度」,反推出这个顶点在哪一行。
+      const row = Math.round((uv.getY(v) * TRACK.textureScale) / course.layout.spacing) % rows;
+      expect(rubber.getX(v)).toBeCloseTo(offset[row] ?? 0, 5);
+      expect(rubber.getY(v)).toBeCloseTo(strength[row] ?? 0, 5);
+    }
   });
 });
