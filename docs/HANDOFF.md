@@ -5694,3 +5694,39 @@ seed 135 第 411–413 行侧倾 −0.39 ~ −0.43 rad(约 −23°),路面边缘
 
 顺带记一个数:倒计时是 3 秒,但 `3 − 180 × (1/60)` 的浮点累减不会恰好到 0,实际在
 第 181 步才发车。测试里不要把步数写死。
+
+---
+
+## 第七十四节:CI 红了,但红的不是代码 —— `ubuntu-latest` 滚到了 26.04(2026-11)
+
+> 编号说明:第七十三节(赛车线橡胶痕迹)在 PR #21 的分支上,还没进 main。
+> 这一节先合进 main,所以 main 上会暂时看到七十二之后直接是七十四。
+> PR #21 合 main 时这个文件末尾会冲突,**两节都留下**,按编号排好即可。
+
+### 现象
+
+PR #21 的 CI 是红的,41 秒就结束。typecheck、单测 615 条、build 都过了,死在
+「Install Chromium」那一步:
+
+```
+Cannot install dependencies for ubuntu26.04-x64 with Playwright 1.56.1!
+Error: ERROR: Playwright does not support chromium on ubuntu26.04-x64
+```
+
+截图测试根本没跑。**和 PR #21 的改动无关** —— main 上次绿是因为那时 `ubuntu-latest`
+还指向 24.04,现在任何一次 push 都会红在同一处。
+
+### 修法
+
+`ci.yml` 的 `runs-on` 从 `ubuntu-latest` 钉成 `ubuntu-24.04`。一行。
+
+**没有选升级 Playwright**:升了会换 Chromium 版本,软件渲染结果跟着变,等于动
+截图回路的基线,那是需要单独验的另一件事,不该夹在「把 CI 救绿」里。
+
+`deploy.yml` 没动 —— 它只 `npm ci` + `npm run build`,不装浏览器,在 26.04 上
+照样能跑。
+
+### 以后会再碰到
+
+`ubuntu-24.04` 镜像总有下线的一天。到时候要做的是升 Playwright(到认新系统的
+版本)并重新看一遍全部截图,而不是再往后钉。
