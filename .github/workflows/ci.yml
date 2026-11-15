@@ -7,9 +7,9 @@ on:
 
 jobs:
   verify:
-    # 钉死版本:ubuntu-latest 滚到 26.04 之后,仓库钉的 Playwright 1.56 不认这个
-    # 系统,`playwright install --with-deps` 直接退出 —— 和被测的代码无关也会红。
-    # 升 Playwright 会换 Chromium、动截图基线,那是另一件事。
+    # 钉死版本而不是 ubuntu-latest:latest 滚到 26.04 那次,当时钉的 Playwright 不认
+    # 新系统,`playwright install --with-deps` 直接退出 —— 和被测的代码无关也会红。
+    # 换镜像要和 Playwright 支持的系统一起核,所以由人来改,不让它自己滚。
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
