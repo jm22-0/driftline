@@ -16,7 +16,8 @@ import { Atmosphere } from '../gfx/atmosphere';
 import type { Group } from 'three';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { applyTrackDamp, createTrackMesh } from '../gfx/trackMesh';
-import { clamp, normalize01 } from '../core/mathx';
+import { gridPlacement } from './startGrid';
+import { normalize01 } from '../core/mathx';
 import { raceFuelLitres } from './fuel';
 import {
   type PitLane,
@@ -75,29 +76,6 @@ function racerIds(rivalCount: number): string[] {
   }
   return ids;
 }
-
-/**
- * 发车格:第 `slot` 位(0 = 玩家的杆位)相对起跑线的纵向后退距离与横向偏移。
- *
- * 两两一排交错(和真实发车格一样),不是一字纵队——纵队里后车全程被前车
- * 挡着,永远看不到超车。
- */
-function gridSlot(slot: number): { back: number; lateral: number } {
-  // 杆位(玩家)留在中心线上。真实发车格杆位也是偏一侧的,但把玩家摆偏之后
-  // 一上来就得先并回赛道中间,而且「起跑在中心线」是既有截图测试钉住的行为
-  // (smoke.spec.ts「起跑时在赛道上」断言 |lateral| < 1)。对手才交错排开。
-  if (slot <= 0) {
-    return { back: 0, lateral: 0 };
-  }
-  const index = slot - 1;
-  const row = Math.floor(index / 2);
-  const side = index % 2 === 0 ? -1 : 1;
-  return {
-    back: (row + 1) * RACE_FORMAT.gridRow,
-    lateral: side * RACE_FORMAT.gridLateral,
-  };
-}
-
 
 /** 固定机位:回归截图用,和玩家实际在用的跟随机位分开。 */
 const FIXED_PRESETS: Readonly<Record<string, { back: number; side: number; up: number }>> = {
@@ -344,15 +322,14 @@ export class World {
        */
       const { samples, spacing, halfWidth } = this.track;
       const count = samples.length;
-      const room = halfWidth - 1.5;
       const placeAt = (vehicle: Vehicle, slot: number): void => {
-        const { back, lateral } = gridSlot(slot);
+        // 地上画的发车格读的是同一个函数(`trackMesh.ts`),车和格子才对得上。
+        const { back, lateral: offset } = gridPlacement(slot, spacing, halfWidth);
         const behindIndex = ((-Math.round(back / spacing) % count) + count) % count;
         const sample = samples[behindIndex];
         if (sample === undefined) {
           return;
         }
-        const offset = clamp(lateral, -room, room);
         // 赛道右手法向 = (tangentZ, -tangentX)。
         vehicle.reset(
           sample.x + sample.tangentZ * offset,

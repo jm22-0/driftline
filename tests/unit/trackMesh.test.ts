@@ -529,7 +529,7 @@ describe('路面标线', () => {
     expect(shader.vertexShader).toContain('attribute float marking;');
     expect(shader.fragmentShader).toContain('float markBand(');
     expect(shader.fragmentShader).toContain('diffuse * uMarkStart * paintGrain, start');
-    expect(Object.keys(shader.uniforms).length).toBe(9);
+    expect(Object.keys(shader.uniforms).length).toBe(16);
     // 注入点在 map_fragment 之后:颗粒系数要用它声明的 sampledDiffuseColor。
     expect(ShaderChunk.map_fragment).toContain('sampledDiffuseColor');
     const fragment = ShaderLib.standard.fragmentShader;

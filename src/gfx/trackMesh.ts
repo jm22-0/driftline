@@ -6,6 +6,7 @@ import {
   Mesh,
   MeshStandardMaterial,
   Vector2,
+  Vector3,
 } from 'three';
 import type { Course } from '../game/course';
 import type { Rng } from '../core/rng';
@@ -13,7 +14,10 @@ import type { Palette } from './palette';
 import { type PitLane, pitRowIndex, pitWallAtRow, rowWithin } from '../game/pitLane';
 import { createSurfaceTextures } from './textures';
 import { clamp, lerp } from '../core/mathx';
-import { TRACK, WEATHER } from '../game/tuning';
+import { RACE_FORMAT, TRACK, WEATHER } from '../game/tuning';
+import { gridPlacement } from '../game/startGrid';
+import { cornerRowMask } from './corners';
+import { createBrakeBoards } from './brakeBoards';
 
 /**
  * 路面标线的尺寸(米)。**在着色器里按真实宽度画,不走顶点色。**
@@ -28,6 +32,36 @@ import { TRACK, WEATHER } from '../game/tuning';
  */
 const EDGE_LINE_WIDTH = 0.25;
 const START_LINE_DEPTH = 0.6;
+
+/**
+ * 弯道路肩(kerb)的红白条。画在边线外侧那一米上。
+ *
+ * 真实赛道的路肩只铺在弯里:入弯、弯心、出弯这几处车会压上去的地方,直道没有。
+ * 所以按曲率开关 —— 曲率过了门槛的那几行,连同前后各一行(入弯前、出弯后车也
+ * 会用到路肩)。两侧都铺:弯心在内侧、出弯在外侧,连续弯里两边都用得上。
+ *
+ * 数值参照 FIA 标准路肩:宽 1 米上下,红白每段 1.5~2 米。哪几行算「弯里」
+ * 见 `corners.ts`。
+ *
+ * **只是漆,没有高度**:真路肩是凸起的,压上去车会颠。那要动 `Course` 的几何和
+ * 物理,是另一件事。
+ */
+const KERB_WIDTH = 1.0;
+const KERB_STRIPE_LENGTH = 1.8;
+
+/**
+ * 发车格:每个车位一个朝前开口的「匚」形白框(F1 那种),车头顶着前面那道横线。
+ *
+ * 位置来自 `gridPlacement()` —— 和 `World` 摆车用的是同一个函数。
+ */
+const GRID_LINE_WIDTH = 0.15;
+/** 框的半宽(米)。车宽 1.8 米,两边各留 0.4。 */
+const GRID_HALF_WIDTH = 1.3;
+/** 两侧短边往后伸多长(米)。 */
+const GRID_SIDE_LENGTH = 1.2;
+/** 横线在车辆中心前方多远(米)。车长 4.2 米,车头前留 0.4。 */
+const GRID_FRONT_OFFSET = 2.5;
+const GRID_SLOTS = RACE_FORMAT.rivalCount + 1;
 
 /** 顶点色当贴图乘数用时的中性值。 */
 const WHITE = new Color().setRGB(1, 1, 1);
@@ -82,6 +116,8 @@ export function createTrackMesh(
     group.add(createPitSurface(course, rng, palette, pit));
   }
   group.add(createGuardrails(course, rng, palette, pit));
+  // 不消耗随机数:放在最后也不影响前面几样拿到的随机序列。
+  group.add(createBrakeBoards(course, pit));
   return group;
 }
 
@@ -157,6 +193,16 @@ function createRibbon(course: Course, rng: Rng, palette: Palette, pit: PitLane |
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
   geometry.setAttribute('marking', new BufferAttribute(markings, 1));
 
+  // 路肩红白条:每个顶点带它**自己那一行**开不开(不是三角形所在的行 ——
+  // 那样一格的前后两排顶点同值,条带会在行边界上硬切)。行号从 UV 的 v 反推。
+  const kerbRows = cornerRowMask(course);
+  const kerb = new Float32Array(triangles * 3);
+  for (let i = 0; i < kerb.length; i++) {
+    const row = Math.round(((uvs[i * 2 + 1] ?? 0) * TRACK.textureScale) / course.layout.spacing);
+    kerb[i] = kerbRows[row % rowCount] ?? 0;
+  }
+  geometry.setAttribute('kerb', new BufferAttribute(kerb, 1));
+
   const textures = createSurfaceTextures(rng, palette.roadSurface);
   const material = new MeshStandardMaterial({
     map: textures.map,
@@ -191,10 +237,37 @@ export interface RoadMarkingUniforms {
   shoulderAlbedo: [number, number, number];
   /** 沥青贴图的基色 —— 用来把贴图采样换算成「颗粒系数」。 */
   asphaltAlbedo: [number, number, number];
+  kerbWidth: number;
+  kerbStripeLength: number;
+  kerbRedAlbedo: [number, number, number];
+  /** 整圈长度(米)。发车格在起跑线后面,弧长要绕回去算。 */
+  trackLength: number;
+  /**
+   * 每个发车格前横线的位置:`[弧长, 横向]`(米),**条带 UV 的坐标系** ——
+   * 横向和 `gridPlacement()` 的符号相反(条带的正方向是赛道左手)。
+   */
+  gridSlots: [number, number][];
+  gridLineWidth: number;
+  gridHalfWidth: number;
+  gridSideLength: number;
+  /** 离起跑线多远以内才可能有发车格(米)。着色器拿它跳过其余路面。 */
+  gridReach: number;
 }
 
 export function roadMarkingUniforms(course: Course, palette: Palette): RoadMarkingUniforms {
   const base = palette.roadSurface.base;
+  const spacing = course.layout.spacing;
+  // 和条带 UV 同一把尺:行数 × 行距。`layout.totalLength` 是样条的真实长度,
+  // 和它差一个取整。
+  const trackLength = course.layout.samples.length * spacing;
+  const gridSlots: [number, number][] = [];
+  let gridReach = 0;
+  for (let slot = 0; slot < GRID_SLOTS; slot++) {
+    const { back, lateral } = gridPlacement(slot, spacing, course.halfWidth);
+    gridReach = Math.max(gridReach, back + GRID_SIDE_LENGTH + 1, GRID_FRONT_OFFSET + 1);
+    const arc = (((GRID_FRONT_OFFSET - back) % trackLength) + trackLength) % trackLength;
+    gridSlots.push([arc, -lateral]);
+  }
   return {
     halfWidth: course.halfWidth,
     shoulderBlend: TRACK.shoulderWidth,
@@ -205,6 +278,15 @@ export function roadMarkingUniforms(course: Course, palette: Palette): RoadMarki
     startAlbedo: [palette.startLine.r, palette.startLine.g, palette.startLine.b],
     shoulderAlbedo: [palette.shoulder.r, palette.shoulder.g, palette.shoulder.b],
     asphaltAlbedo: [base[0] ?? 0.055, base[1] ?? 0.055, base[2] ?? 0.055],
+    kerbWidth: KERB_WIDTH,
+    kerbStripeLength: KERB_STRIPE_LENGTH,
+    kerbRedAlbedo: [palette.kerbRed.r, palette.kerbRed.g, palette.kerbRed.b],
+    trackLength,
+    gridSlots,
+    gridLineWidth: GRID_LINE_WIDTH,
+    gridHalfWidth: GRID_HALF_WIDTH,
+    gridSideLength: GRID_SIDE_LENGTH,
+    gridReach,
   };
 }
 
@@ -245,20 +327,32 @@ function applyRoadMarkings(material: MeshStandardMaterial, course: Course, palet
     shader.uniforms['uMarkStart'] = { value: new Color(...u.startAlbedo) };
     shader.uniforms['uMarkShoulder'] = { value: new Color(...u.shoulderAlbedo) };
     shader.uniforms['uMarkAsphalt'] = { value: new Color(...u.asphaltAlbedo) };
+    shader.uniforms['uMarkKerbWidth'] = { value: u.kerbWidth };
+    shader.uniforms['uMarkKerbStripe'] = { value: u.kerbStripeLength };
+    shader.uniforms['uMarkKerbRed'] = { value: new Color(...u.kerbRedAlbedo) };
+    shader.uniforms['uMarkLength'] = { value: u.trackLength };
+    shader.uniforms['uMarkGrid'] = { value: u.gridSlots.map(([arc, lateral]) => new Vector2(arc, lateral)) };
+    shader.uniforms['uMarkGridReach'] = { value: u.gridReach };
+    shader.uniforms['uMarkGridBox'] = {
+      value: new Vector3(u.gridLineWidth, u.gridHalfWidth, u.gridSideLength),
+    };
 
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
         `#include <common>
 attribute float marking;
+attribute float kerb;
 varying vec2 vMarkPos;
-varying float vMarking;`,
+varying float vMarking;
+varying float vKerb;`,
       )
       .replace(
         '#include <uv_vertex>',
         `#include <uv_vertex>
 vMarkPos = uv;
-vMarking = marking;`,
+vMarking = marking;
+vKerb = kerb;`,
       );
 
     shader.fragmentShader = shader.fragmentShader
@@ -274,8 +368,16 @@ uniform vec3 uMarkPaint;
 uniform vec3 uMarkStart;
 uniform vec3 uMarkShoulder;
 uniform vec3 uMarkAsphalt;
+uniform float uMarkKerbWidth;
+uniform float uMarkKerbStripe;
+uniform vec3 uMarkKerbRed;
+uniform float uMarkLength;
+uniform vec2 uMarkGrid[${GRID_SLOTS}];
+uniform vec3 uMarkGridBox;
+uniform float uMarkGridReach;
 varying vec2 vMarkPos;
 varying float vMarking;
+varying float vKerb;
 
 // 一段 [lo, hi] 区间的抗锯齿掩码。线在远处会细于一个像素,硬边会闪。
 float markBand(float x, float lo, float hi) {
@@ -301,12 +403,41 @@ float markBand(float x, float lo, float hi) {
   float shoulder = smoothstep(uMarkHalfWidth, uMarkHalfWidth + uMarkShoulderBlend * 0.5, side) * shoulderEnabled;
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uMarkShoulder * grain, shoulder);
 
+  vec3 paintGrain = mix(vec3(1.0), grain, 0.35);
+
+  // 路肩红白条:边线外侧那一米,只在弯里。红白沿弧长交替;用三角波而不是
+  // fract 取阈值,远处才能按像素宽度抗锯齿,不闪。
+  float kerbBand = markBand(side, uMarkHalfWidth, uMarkHalfWidth + uMarkKerbWidth);
+  float kerbOn = smoothstep(0.45, 0.55, vKerb) * shoulderEnabled;
+  float wave = abs(fract(arc / (2.0 * uMarkKerbStripe)) - 0.5) * 2.0;
+  float white = clamp((wave - 0.5) / max(fwidth(wave), 1e-4) + 0.5, 0.0, 1.0);
+  vec3 kerbColor = mix(uMarkKerbRed, uMarkPaint, white);
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * kerbColor * paintGrain, kerbBand * kerbOn);
+
   // 边线:紧贴路面边缘内侧。漆面只透出一部分颗粒。
   float edge = markBand(side, uMarkHalfWidth - uMarkEdgeWidth, uMarkHalfWidth) * lineEnabled;
   // 起跑/终点线:弧长 0 处横跨路面。
   float start = markBand(arc, 0.0, uMarkStartDepth) * step(side, uMarkHalfWidth) * lineEnabled;
-  vec3 paintGrain = mix(vec3(1.0), grain, 0.35);
-  diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uMarkPaint * paintGrain, edge);
+
+  // 发车格:前横线 + 两条往后伸的短边。弧长绕回到 [-L/2, L/2] 再比,
+  // 起跑线后面的格子弧长接近整圈长度。
+  float grid = 0.0;
+  // 整圈路面只有起跑线附近几十米有格子,其余像素不进这个循环:软件渲染下
+  // 这一段占了路面着色的可见份额(实测每帧 +7% → 见 HANDOFF)。
+  float fromStart = arc - uMarkLength * floor(arc / uMarkLength + 0.5);
+  if (abs(fromStart) < uMarkGridReach)
+  for (int i = 0; i < ${GRID_SLOTS}; i++) {
+    float along = arc - uMarkGrid[i].x;
+    along -= uMarkLength * floor(along / uMarkLength + 0.5);
+    float across = lateral - uMarkGrid[i].y;
+    float front = markBand(along, 0.0, uMarkGridBox.x) * markBand(across, -uMarkGridBox.y, uMarkGridBox.y);
+    float sides = markBand(along, -uMarkGridBox.z, uMarkGridBox.x) *
+      (markBand(across, -uMarkGridBox.y, -uMarkGridBox.y + uMarkGridBox.x) +
+       markBand(across, uMarkGridBox.y - uMarkGridBox.x, uMarkGridBox.y));
+    grid = max(grid, max(front, sides));
+  }
+
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uMarkPaint * paintGrain, max(edge, grid * lineEnabled));
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uMarkStart * paintGrain, start);
 }`,
       );
@@ -365,21 +496,120 @@ function createPitSurface(course: Course, rng: Rng, palette: Palette, pit: PitLa
   geometry.setAttribute('color', new BufferAttribute(colors, 3));
 
   const textures = createSurfaceTextures(rng, palette.roadSurface);
-  const mesh = new Mesh(
-    geometry,
-    new MeshStandardMaterial({
-      map: textures.map,
-      normalMap: textures.normalMap,
-      roughnessMap: textures.roughnessMap,
-      normalScale: new Vector2(0.8, 0.8),
-      vertexColors: true,
-      metalness: 0.02,
-    }),
-  );
+  const material = new MeshStandardMaterial({
+    map: textures.map,
+    normalMap: textures.normalMap,
+    roughnessMap: textures.roughnessMap,
+    normalScale: new Vector2(0.8, 0.8),
+    vertexColors: true,
+    metalness: 0.02,
+  });
+  applyPitMarkings(material, pit, palette);
+  const mesh = new Mesh(geometry, material);
   mesh.name = 'pit-surface';
   mesh.userData['roadSurface'] = true;
   mesh.receiveShadow = true;
   return mesh;
+}
+
+/** 维修道标线着色器的参数。坐标是维修道路面 UV 的那一套:横向从内缘起算,弧长不回绕。 */
+export interface PitMarkingUniforms {
+  /** 快车道和车位区之间那条纵线离内缘多远(米)。 */
+  laneDivider: number;
+  /** 隔离墙起止处的弧长:限速区两端各一道横线,纵线也只画在这一段。 */
+  wallStartArc: number;
+  wallEndArc: number;
+  /** 车位起止处的弧长:车位区里前后各一道横线。 */
+  boxStartArc: number;
+  boxEndArc: number;
+  lineWidth: number;
+  paintAlbedo: [number, number, number];
+  asphaltAlbedo: [number, number, number];
+}
+
+/** 维修道标线宽度(米)。和发车格同一档。 */
+const PIT_LINE_WIDTH = 0.15;
+
+export function pitMarkingUniforms(pit: PitLane, palette: Palette): PitMarkingUniforms {
+  const base = palette.roadSurface.base;
+  // 维修道路面的 v = (entryRow + j) × 行距,j 是从入口起算的行数 —— 跨过终点线
+  // 也不回绕,所以这里同样从入口往后数,不能直接拿行号乘行距。
+  const arcOf = (row: number): number =>
+    (pit.entryRow + ((((row - pit.entryRow) % pit.rowCount) + pit.rowCount) % pit.rowCount)) *
+    pit.spacing;
+  return {
+    laneDivider: pit.boxLateralMin - pit.lateralMin,
+    wallStartArc: arcOf(pit.wallStartRow),
+    wallEndArc: arcOf(pit.wallEndRow),
+    boxStartArc: arcOf(pit.boxStartRow),
+    // 车位的最后一行是「含」的,它那一格的后沿在下一行。
+    boxEndArc: arcOf(pit.boxEndRow) + pit.spacing,
+    lineWidth: PIT_LINE_WIDTH,
+    paintAlbedo: [palette.roadEdge.r, palette.roadEdge.g, palette.roadEdge.b],
+    asphaltAlbedo: [base[0] ?? 0.055, base[1] ?? 0.055, base[2] ?? 0.055],
+  };
+}
+
+/**
+ * 维修道上的白线:快车道 / 车位区的分界线、限速区两端的横线、车位前后的横线。
+ *
+ * 真实维修道就是靠这几条线读的:过了第一道横线开始限速,纵线右边是作业区,
+ * 两道短横线之间是你的车位。原来只有顶点色涂的色块,最细一列,看不出是「线」。
+ * 画法和 `applyRoadMarkings()` 一样:着色器里按真实宽度、按绝对反照率。
+ */
+function applyPitMarkings(material: MeshStandardMaterial, pit: PitLane, palette: Palette): void {
+  const u = pitMarkingUniforms(pit, palette);
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms['uPitDivider'] = { value: u.laneDivider };
+    shader.uniforms['uPitWall'] = { value: new Vector2(u.wallStartArc, u.wallEndArc) };
+    shader.uniforms['uPitBox'] = { value: new Vector2(u.boxStartArc, u.boxEndArc) };
+    shader.uniforms['uPitLine'] = { value: u.lineWidth };
+    shader.uniforms['uPitScale'] = { value: TRACK.textureScale };
+    shader.uniforms['uPitPaint'] = { value: new Color(...u.paintAlbedo) };
+    shader.uniforms['uPitAsphalt'] = { value: new Color(...u.asphaltAlbedo) };
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vPitPos;')
+      .replace('#include <uv_vertex>', '#include <uv_vertex>\nvPitPos = uv;');
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+uniform float uPitDivider;
+uniform vec2 uPitWall;
+uniform vec2 uPitBox;
+uniform float uPitLine;
+uniform float uPitScale;
+uniform vec3 uPitPaint;
+uniform vec3 uPitAsphalt;
+varying vec2 vPitPos;
+
+float pitBand(float x, float lo, float hi) {
+  float w = max(fwidth(x), 1e-4);
+  return clamp((x - lo) / w + 0.5, 0.0, 1.0) * clamp((hi - x) / w + 0.5, 0.0, 1.0);
+}`,
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+{
+  float across = vPitPos.x * uPitScale;
+  float arc = vPitPos.y * uPitScale;
+  float halfLine = uPitLine * 0.5;
+  // 纵线:快车道和车位区的分界,只在有隔离墙的那一段(两端是引道,没有车位区)。
+  float divider = pitBand(across, uPitDivider - halfLine, uPitDivider + halfLine) * pitBand(arc, uPitWall.x, uPitWall.y);
+  // 限速线:隔离墙起止处横跨快车道。比别的线宽一倍,这是要让人看见的那条。
+  float limit = (pitBand(arc, uPitWall.x - uPitLine, uPitWall.x + uPitLine) + pitBand(arc, uPitWall.y - uPitLine, uPitWall.y + uPitLine)) * step(across, uPitDivider);
+  // 车位前后的横线,只在车位区那一侧。
+  float bay = (pitBand(arc, uPitBox.x - halfLine, uPitBox.x + halfLine) + pitBand(arc, uPitBox.y - halfLine, uPitBox.y + halfLine)) * step(uPitDivider, across);
+  vec3 grain = sampledDiffuseColor.rgb / max(uPitAsphalt, vec3(1e-3));
+  float paint = clamp(max(divider, max(limit, bay)), 0.0, 1.0);
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuse * uPitPaint * mix(vec3(1.0), grain, 0.35), paint);
+}`,
+      );
+  };
+  material.customProgramCacheKey = () => 'driftline-pit-markings';
 }
 
 /**
