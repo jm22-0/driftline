@@ -7,7 +7,10 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # 钉死版本:ubuntu-latest 滚到 26.04 之后,仓库钉的 Playwright 1.56 不认这个
+    # 系统,`playwright install --with-deps` 直接退出 —— 和被测的代码无关也会红。
+    # 升 Playwright 会换 Chromium、动截图基线,那是另一件事。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
