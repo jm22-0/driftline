@@ -90,7 +90,7 @@ CI runner 没有 GPU,所以游戏支持**确定性手动步进**:`?test=1&seed=N
 改由测试代码逐帧推进,再用 SwiftShader 软件渲染截图。这让自动化流程能真正"看到"画面,
 而不只是确认编译通过。细节见 [CLAUDE.md](CLAUDE.md)。
 
-Playwright 固定在 `~1.56.1`:每个 Playwright 版本绑定一个 Chromium 构建号,
+Playwright 固定在 `~1.63.0`(Chromium 构建号 1243):每个 Playwright 版本绑定一个 Chromium 构建号,
 浮到最新会让本地与 CI 拿到不同的渲染器版本,截图基线就没法比。升级请连同
 截图一起复核。
 
