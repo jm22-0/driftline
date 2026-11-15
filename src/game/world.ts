@@ -17,6 +17,8 @@ import type { Group } from 'three';
 import { createTerrainMesh } from '../gfx/terrainMesh';
 import { applyTrackDamp, createTrackMesh } from '../gfx/trackMesh';
 import { gridPlacement } from './startGrid';
+import { findStartLamps, setStartLamps, startLampsLit } from '../gfx/startFacilities';
+import type { MeshStandardMaterial } from 'three';
 import { normalize01 } from '../core/mathx';
 import { raceFuelLitres } from './fuel';
 import {
@@ -179,6 +181,8 @@ export class World {
 
   /** 测试模式:跳过发车倒计时,理由见 `raceSession.ts` 的类注释。 */
   private readonly skipCountdown: boolean;
+  /** 起跑灯。平地场没有龙门架,是空数组。 */
+  private readonly startLamps: MeshStandardMaterial[];
 
   constructor(rng: Rng, kind: CourseKind = 'race', options: { skipCountdown?: boolean } = {}) {
     this.skipCountdown = options.skipCountdown === true;
@@ -280,6 +284,7 @@ export class World {
     for (const rival of this.rivals) {
       rival.setWeather(this.weather);
     }
+    this.startLamps = findStartLamps(trackMesh);
     if (trackMesh !== null) {
       applyTrackDamp(trackMesh, this.weather.damp);
     }
@@ -456,6 +461,10 @@ export class World {
      * 从下一步一起开始。
      */
     const countingDown = this.session?.phase === 'countdown';
+    setStartLamps(
+      this.startLamps,
+      countingDown ? startLampsLit(this.session?.countdown ?? 0, RACE_FORMAT.countdownSeconds) : 0,
+    );
 
     /*
      * 发车倒计时中、以及冲线之后,输入被锁住。抢跑不判罚——压根动不了,
