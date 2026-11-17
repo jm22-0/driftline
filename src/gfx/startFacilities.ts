@@ -44,8 +44,8 @@ const LAMP_RADIUS = 0.24;
 const LAMP_SPACING = 0.75;
 
 /** 主看台:起跑线前后各几行(一行 6 米)。 */
-const STAND_ROWS_BEFORE = 7;
-const STAND_ROWS_AFTER = 6;
+export const STAND_ROWS_BEFORE = 7;
+export const STAND_ROWS_AFTER = 6;
 /** 看台前沿离条带外缘多远(米)。护墙厚 0.55,再留一条走道。 */
 export const STAND_SETBACK = 3;
 const STAND_TIERS = 10;
@@ -54,11 +54,11 @@ const STAND_TIER_RISE = 0.5;
 /** 第一排座位离地多高(米):要高过护墙(1.08 米),不然第一排看的是墙。 */
 const STAND_FRONT_HEIGHT = 1.4;
 /** 地形不平:结构往地面以下多埋这么深,免得悬空露缝。 */
-const SKIRT = 3;
+export const SKIRT = 3;
 
 /** 维修区建筑离维修道外缘多远(米)、进深、檐高。 */
 export const GARAGE_SETBACK = 1.6;
-const GARAGE_DEPTH = 8;
+export const GARAGE_DEPTH = 8;
 const GARAGE_HEIGHT = 5.6;
 /** 一个车库开间的宽度(米)。贴图按它平铺。 */
 const GARAGE_BAY = 6;
@@ -160,7 +160,7 @@ export function garagePixels(): Uint8Array {
   return data;
 }
 
-function tiledTexture(data: Uint8Array, width: number, height: number): DataTexture {
+export function tiledTexture(data: Uint8Array, width: number, height: number): DataTexture {
   const texture = new DataTexture(data, width, height, RGBAFormat, UnsignedByteType);
   texture.colorSpace = SRGBColorSpace;
   texture.wrapS = RepeatWrapping;
@@ -173,7 +173,7 @@ function tiledTexture(data: Uint8Array, width: number, height: number): DataText
 }
 
 /** 剖面上的一个点:`out` 从基线向外(米),`up` 从基线地面向上(米),`v` 是贴图纵坐标。 */
-interface ProfilePoint {
+export interface ProfilePoint {
   out: number;
   up: number;
   v: number;
@@ -188,7 +188,7 @@ interface ProfilePoint {
  *
  * `uPerMetre` 为 0 时这一带的 u 固定在 `uConstant`(指向贴图里的一块纯色)。
  */
-function sweep(
+export function sweep(
   course: Course,
   rows: readonly number[],
   side: -1 | 1,
