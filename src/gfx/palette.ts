@@ -29,6 +29,8 @@ export interface Palette {
   roadEdge: Color;
   wallCap: Color;
   startLine: Color;
+  /** 路肩红白条里的红。**绝对反照率**,和 `roadEdge` 同一套口径;白条直接用 `roadEdge`。 */
+  kerbRed: Color;
   /**
    * 维修车位。和下面的 `pitApron` 一样是**顶点色乘数**,乘在沥青贴图上。
    * **故意用一个赛道上不会出现的颜色**(偏蓝的冷色)——
@@ -113,6 +115,8 @@ export function createPalette(rng: Rng): Palette {
     // 护墙的压顶。比墙身深一档:顶面积灰、被雨水冲刷,现实里从来不是最亮的那块。
     wallCap: linear(0.62, 0.61, 0.585),
     startLine: linear(0.5, 0.49, 0.46),
+    // 晒过、被轮胎磨过的路肩漆,不是消防车那种饱和红。
+    kerbRed: linear(0.46, 0.07, 0.05),
     pitBox: linear(0.24, 0.42, 0.62),
     pitApron: linear(0.44, 0.52, 0.62),
 
