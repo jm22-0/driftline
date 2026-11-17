@@ -49,3 +49,33 @@ export function cornerRowMask(course: Course): Float32Array {
   }
   return mask;
 }
+
+/**
+ * 每一行的「弯道外侧」是哪一边:`Course` 的横向符号,不在弯里是 0。
+ *
+ * 外侧 = 车冲出去会去的那一边,真实赛道的看台和广告牌都摆在那儿。
+ * `cornerRowMask()` 向前后各扩出来的那一行自己的曲率还没起来,符号是噪声,
+ * 所以跟着紧挨着的那一行过门槛的走。
+ */
+export function cornerOutsideSide(course: Course): Int8Array {
+  const count = course.layout.samples.length;
+  const mask = cornerRowMask(course);
+  const side = new Int8Array(count);
+  for (let row = 0; row < count; row++) {
+    const k = rowCurvature(course, row);
+    if (Math.abs(k) >= CORNER_CURVATURE) {
+      side[row] = k > 0 ? -1 : 1;
+    }
+  }
+  const out = new Int8Array(count);
+  for (let row = 0; row < count; row++) {
+    if ((mask[row] ?? 0) === 0) {
+      continue;
+    }
+    const own = side[row] ?? 0;
+    const next = side[(row + 1) % count] ?? 0;
+    const previous = side[(row - 1 + count) % count] ?? 0;
+    out[row] = own !== 0 ? own : next !== 0 ? next : previous;
+  }
+  return out;
+}

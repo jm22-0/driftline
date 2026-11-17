@@ -19,6 +19,7 @@ import { gridPlacement } from '../game/startGrid';
 import { cornerRowMask } from './corners';
 import { createBrakeBoards } from './brakeBoards';
 import { createStartFacilities } from './startFacilities';
+import { createTrackside } from './trackside';
 
 /**
  * 路面标线的尺寸(米)。**在着色器里按真实宽度画,不走顶点色。**
@@ -120,6 +121,7 @@ export function createTrackMesh(
   // 不消耗随机数:放在最后也不影响前面几样拿到的随机序列。
   group.add(createBrakeBoards(course, pit));
   group.add(createStartFacilities(course, palette, pit));
+  group.add(createTrackside(course, palette, pit));
   return group;
 }
 
